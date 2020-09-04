@@ -2,4 +2,4 @@
  (name multipart_form)
  (public_name multipart_form)
  (libraries bigarray-compat bigstringaf ke stdlib-shims unstrctrd unstrctrd.parser base64 base64.rfc2045
-   pecu result rresult uutf fmt angstrom))
+   pecu result rresult uutf fmt angstrom faraday))

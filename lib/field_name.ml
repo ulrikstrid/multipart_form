@@ -37,7 +37,9 @@ let of_string x =
       if not (is_ftext x.[i]) then raise Break
     done ;
     Ok x
-  with Break -> Rresult.R.error_msgf "Invalid field: %S" x
+  with
+  | Break ->
+    Rresult.R.error_msgf "Invalid field: %S" x
 
 let of_string_exn x =
   match of_string x with

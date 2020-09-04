@@ -3,10 +3,8 @@ open Angstrom
 
 (* From RFC 2046
 
-     bcharsnospace := DIGIT / ALPHA / "'" / "(" / ")" /
-                      "+" / "_" / "," / "-" / "." /
-                      "/" / ":" / "=" / "?"
-*)
+   bcharsnospace := DIGIT / ALPHA / "'" / "(" / ")" / "+" / "_" / "," / "-" /
+   "." / "/" / ":" / "=" / "?" *)
 let is_bcharsnospace = function
   | '\'' | '(' | ')' | '+' | '_' | ',' | '-' | '.' | '/' | ':' | '=' | '?' ->
       true
@@ -98,11 +96,11 @@ let encapsulation boundary body =
 
 (* From RFC 2046:
 
-     preamble := discard-text
-     discard-text := *( *text CRLF)
-                     ; May be ignored or discarded.
+   preamble := discard-text discard-text := *( *text CRLF) ; May be ignored or
+   discarded.
 
-   XXX(dinosaure): this parser consume the last CRLF which is NOT included in the ABNF. *)
+   XXX(dinosaure): this parser consume the last CRLF which is NOT included in
+   the ABNF. *)
 let preambule boundary = discard_all_to_dash_boundary boundary
 
 let epilogue parent =

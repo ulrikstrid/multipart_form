@@ -5,19 +5,60 @@ module Header = Header
 module Content_type = Content_type
 module Content_encoding = Content_encoding
 module Content_disposition = Content_disposition
+module Content_encoding = Content_encoding
+
+module IOVec = struct
+  type 'a t = 'a Faraday.iovec =
+    { buffer : 'a
+    ; off : int
+    ; len : int
+    }
+
+  let make buffer ~off ~len = { Faraday.buffer; off; len }
+
+  let substring { Faraday.buffer; off; len } =
+    Bigstringaf.substring buffer ~off ~len
+
+  let copy buf ~off ~len =
+    let buffer = Bigstringaf.copy buf ~off ~len in
+    make buffer ~off:0 ~len
+
+  let with_push ?(end_of_line = "\n") push =
+    let eol_len = String.length end_of_line in
+    (* TODO(anmonteiro): optimize *)
+    let write_data s =
+      let len = String.length s in
+      let buffer = Bigstringaf.create len in
+      Bigstringaf.blit_from_string s ~src_off:0 buffer ~dst_off:0 ~len;
+      push (Some (make buffer ~off:0 ~len))
+    in
+    let write_line s =
+      let strlen = String.length s in
+      let len = strlen + eol_len in
+      let buffer = Bigstringaf.create len in
+      Bigstringaf.blit_from_string s ~src_off:0 buffer ~dst_off:0 ~len:strlen;
+      Bigstringaf.blit_from_string
+        end_of_line
+        ~src_off:0
+        buffer
+        ~dst_off:strlen
+        ~len:eol_len;
+      push (Some (make buffer ~off:0 ~len))
+    in
+    write_data, write_line
+end
 
 module B64 = struct
   open Angstrom
 
   let parser ~write_data end_of_body =
     let dec = Base64_rfc2045.decoder `Manual in
-
     let check_end_of_body =
       let expected_len = String.length end_of_body in
       Unsafe.peek expected_len (fun ba ~off ~len ->
           let raw = Bigstringaf.substring ba ~off ~len in
-          String.equal raw end_of_body) in
-
+          String.equal raw end_of_body)
+    in
     let trailer () =
       let rec finish () =
         match Base64_rfc2045.decode dec with
@@ -70,7 +111,7 @@ module B64 = struct
     go ()
 
   let with_emitter ~emitter end_of_body =
-    let write_data x = emitter (Some x) in
+    let write_data, _ = IOVec.with_push emitter in
     parser ~write_data end_of_body
 
   let to_end_of_input ~write_data =
@@ -96,50 +137,114 @@ module B64 = struct
         m
     | `Malformed err -> fail err
     | `Wrong_padding -> fail "wrong padding"
+
+  let to_end_of_input_with_push push =
+    let write_data, _ = IOVec.with_push push in
+    to_end_of_input ~write_data
 end
 
 module RAW = struct
   open Angstrom
 
-  let parser ~write_line end_of_body =
+  type chunks =
+    { length : int ref
+    ; mutable chunks : Bigstringaf.t IOVec.t list
+    }
+
+  let bounded_end_of_body
+      ~max_chunk_size end_of_body_discriminant current_chunk_size c
+    =
+    let cur_size = !current_chunk_size in
+    (* leave space for the `\r` char *)
+    let big_enough = cur_size + 1 >= max_chunk_size in
+    let result = Char.equal end_of_body_discriminant c in
+    let result = big_enough || result in
+    if not result then incr current_chunk_size;
+    result
+
+  let iovec_from_chunks { chunks; length } =
+    let len = !length in
+    let result_buffer = Bigstringaf.create len in
+    (* This is a rev list, so we walk the chunks backwards. *)
+    let final_len =
+      List.fold_left
+        (fun prev_off { IOVec.buffer; off; len } ->
+          let cur_off = prev_off - len in
+          Bigstringaf.unsafe_blit
+            buffer
+            ~src_off:off
+            result_buffer
+            ~dst_off:cur_off
+            ~len;
+          cur_off)
+        len
+        chunks
+    in
+    assert (final_len = 0);
+    IOVec.make result_buffer ~off:0 ~len:(Bigstringaf.length result_buffer)
+
+  let parser ~max_chunk_size ~write_data ~pred ~check_end =
+    let current_chunks = { length = ref 0; chunks = [] } in
+    let pred = pred current_chunks.length in
+    fix (fun m ->
+        Unsafe.take_till pred IOVec.copy >>= fun chunk ->
+        check_end >>= function
+        | true ->
+          current_chunks.chunks <- chunk :: current_chunks.chunks;
+          let iovec = iovec_from_chunks current_chunks in
+          current_chunks.length := 0;
+          current_chunks.chunks <- [];
+          if iovec.len <> 0 then write_data iovec;
+          commit
+        | false ->
+          (* [\r] *)
+          Unsafe.take 1 IOVec.copy >>= fun cr ->
+          incr current_chunks.length;
+          current_chunks.chunks <- cr :: chunk :: current_chunks.chunks;
+          if !(current_chunks.length) >= max_chunk_size then (
+            let iovec = iovec_from_chunks current_chunks in
+            current_chunks.length := 0;
+            current_chunks.chunks <- [];
+            write_data iovec;
+            commit *> m)
+          else
+            m)
+
+  let multipart_parser ~max_chunk_size ~write_data end_of_body =
     let check_end_of_body =
       let expected_len = String.length end_of_body in
       Unsafe.peek expected_len (fun ba ~off ~len ->
           let raw = Bigstringaf.substring ba ~off ~len in
-          String.equal raw end_of_body) in
+          String.equal raw end_of_body)
+    in
+    let bounded_end_of_body =
+      bounded_end_of_body ~max_chunk_size end_of_body.[0]
+    in
+    parser
+      ~max_chunk_size
+      ~write_data
+      ~pred:bounded_end_of_body
+      ~check_end:check_end_of_body
 
-    fix @@ fun m ->
-    let choose chunk = function
-      | true ->
-          let chunk = Bytes.sub_string chunk 0 (Bytes.length chunk - 1) in
-          write_line chunk ;
-          commit
-      | false ->
-          Bytes.set chunk (Bytes.length chunk - 1) end_of_body.[0] ;
-          write_line (Bytes.unsafe_to_string chunk) ;
-          advance 1 *> m in
+  let with_push ~max_chunk_size ~push end_of_body =
+    let write_data x = push (Some x) in
+    multipart_parser ~max_chunk_size ~write_data end_of_body
 
-    Unsafe.take_while (( <> ) end_of_body.[0]) Bigstringaf.substring
-    >>= fun chunk ->
-    let chunk' = Bytes.create (String.length chunk + 1) in
-    Bytes.blit_string chunk 0 chunk' 0 (String.length chunk) ;
-    check_end_of_body >>= choose chunk'
+  let to_end_of_input ~max_chunk_size ~write_data =
+    parser
+      ~max_chunk_size
+      ~write_data
+      ~check_end:at_end_of_input
+      ~pred:(fun current_chunk_size _ ->
+        let cur_size = !current_chunk_size in
+        (* leave space for an additional character *)
+        let big_enough = cur_size + 1 >= max_chunk_size in
+        if not big_enough then incr current_chunk_size;
+        big_enough)
 
-  let with_emitter ~emitter end_of_body =
-    let write_line x = emitter (Some x) in
-    parser ~write_line end_of_body
-
-  let to_end_of_input ~write_data =
-    fix @@ fun m ->
-    peek_char >>= function
-    | None -> commit
-    | Some _ ->
-        available >>= fun n ->
-        Unsafe.take n (fun ba ~off ~len ->
-            let chunk = Bytes.create len in
-            Bigstringaf.blit_to_bytes ba ~src_off:off chunk ~dst_off:0 ~len ;
-            write_data (Bytes.unsafe_to_string chunk))
-        >>= fun () -> m
+  let to_end_of_input_with_push ~max_chunk_size push =
+    let write_data x = push (Some x) in
+    to_end_of_input ~max_chunk_size ~write_data
 end
 
 module QP = struct
@@ -152,8 +257,8 @@ module QP = struct
       let expected_len = String.length end_of_body in
       Unsafe.peek expected_len (fun ba ~off ~len ->
           let raw = Bigstringaf.substring ba ~off ~len in
-          String.equal raw end_of_body) in
-
+          String.equal raw end_of_body)
+    in
     let trailer () =
       let rec finish () =
         match Pecu.decode dec with
@@ -261,6 +366,14 @@ module QP = struct
         write_line line ;
         m
     | `Malformed err -> fail err
+
+  let with_push ~push end_of_body =
+    let write_data, write_line = IOVec.with_push push in
+    parser ~write_data ~write_line end_of_body
+
+  let to_end_of_input_with_push ?end_of_line push =
+    let write_data, write_line = IOVec.with_push ?end_of_line push in
+    to_end_of_input ~write_data ~write_line
 end
 
 type 'a elt = { header : Header.t; body : 'a }
@@ -283,17 +396,14 @@ let encoding fields =
 
 let failf fmt = Fmt.kstrf Angstrom.fail fmt
 
-let octet ~emitter boundary header =
+let octet ~max_chunk_size ~emitter boundary header =
   let open Angstrom in
   match boundary with
   | None ->
-      let write_line line = emitter (Some (line ^ "\n")) in
-      let write_data data = emitter (Some data) in
-
       (match encoding header with
-      | `Quoted_printable -> QP.to_end_of_input ~write_data ~write_line
-      | `Base64 -> B64.to_end_of_input ~write_data
-      | `Bit7 | `Bit8 | `Binary -> RAW.to_end_of_input ~write_data
+      | `Quoted_printable -> QP.to_end_of_input_with_push emitter
+      | `Base64 -> B64.to_end_of_input_with_push emitter
+      | `Bit7 | `Bit8 | `Binary -> RAW.to_end_of_input_with_push ~max_chunk_size emitter
       | `Ietf_token v | `X_token v ->
           failf "Invalid Content-Transfer-Encoding value (%s)" v)
       >>= fun () ->
@@ -302,16 +412,16 @@ let octet ~emitter boundary header =
   | Some boundary ->
       let end_of_body = Rfc2046.make_delimiter boundary in
       (match encoding header with
-      | `Quoted_printable -> QP.with_emitter ~emitter end_of_body
+      | `Quoted_printable -> QP.with_push ~push:emitter end_of_body
       | `Base64 -> B64.with_emitter ~emitter end_of_body
-      | `Bit7 | `Bit8 | `Binary -> RAW.with_emitter ~emitter end_of_body
+      | `Bit7 | `Bit8 | `Binary -> RAW.with_push ~max_chunk_size ~push:emitter end_of_body
       | `Ietf_token v | `X_token v ->
           failf "Invalid Content-Transfer-Encoding value (%s)" v)
       >>= fun () ->
       emitter None ;
       return ()
 
-type 'id emitters = Header.t -> (string option -> unit) * 'id
+type 'id emitters = Header.t -> (Bigstringaf.t Faraday.iovec option -> unit) * 'id
 
 type discrete = [ `Text | `Image | `Audio | `Video | `Application ]
 
@@ -321,8 +431,11 @@ let boundary header =
   | Some (Token boundary) | Some (String boundary) -> Some boundary
   | None -> None
 
-let parser : emitters:'id emitters -> Field.field list -> 'id t Angstrom.t =
- fun ~emitters header ->
+let parser
+    : max_chunk_size:int -> emitters:'id emitters -> Field.field list
+    -> 'id t Angstrom.t
+  =
+ fun ~max_chunk_size ~emitters header ->
   let open Angstrom in
   let rec body parent header =
     match Content_type.ty (Header.content_type header) with
@@ -330,7 +443,8 @@ let parser : emitters:'id emitters -> Field.field list -> 'id t Angstrom.t =
         failf "Invalid Content-Transfer-Encoding value (%s)" v
     | #discrete ->
         let emitter, id = emitters header in
-        octet ~emitter parent header >>| fun () -> Leaf { header; body = id }
+        octet ~max_chunk_size ~emitter parent header >>| fun () ->
+          Leaf { header; body = id }
     | `Multipart ->
     match boundary header with
     | Some boundary ->
