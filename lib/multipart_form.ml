@@ -5,7 +5,6 @@ module Header = Header
 module Content_type = Content_type
 module Content_encoding = Content_encoding
 module Content_disposition = Content_disposition
-module Content_encoding = Content_encoding
 
 module IOVec = struct
   type 'a t = 'a Faraday.iovec =
@@ -336,11 +335,6 @@ module QP = struct
       | `Malformed err -> fail err in
     go ()
 
-  let with_emitter ?(end_of_line = "\n") ~emitter end_of_body =
-    let write_data x = emitter (Some x) in
-    let write_line x = emitter (Some (x ^ end_of_line)) in
-    parser ~write_data ~write_line end_of_body
-
   let to_end_of_input ~write_data ~write_line =
     let dec = Pecu.decoder `Manual in
 
@@ -474,8 +468,10 @@ let of_stream stream content_type =
     let idx = gen () in
     let buf = Buffer.create 0x100 in
     Hashtbl.add tbl idx buf ;
-    ((function Some str -> Buffer.add_string buf str | None -> ()), idx) in
-  let parser = parser ~emitters content_type in
+    ((function Some iovec ->
+      let str = IOVec.substring iovec in
+      Buffer.add_string buf str | None -> ()), idx) in
+  let parser = parser ~emitters ~max_chunk_size:0x100 content_type in
   let module Ke = Ke.Rke in
   let ke = Ke.create ~capacity:0x1000 Bigarray.Char in
   let rec go = function

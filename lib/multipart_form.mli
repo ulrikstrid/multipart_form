@@ -173,7 +173,7 @@ module Header : sig
   end
 end
 
-type 'id emitters = Header.t -> (string option -> unit) * 'id
+type 'id emitters = Header.t -> (Bigstringaf.t Faraday.iovec option -> unit) * 'id
 (** Type of emitters.
 
     An [emitters] is able to produce from the given header a {i pusher} which is
@@ -194,7 +194,7 @@ type 'a elt = { header : Header.t; body : 'a }
        indeed, we can have a multipart inside a multipart.}} *)
 type 'a t = Leaf of 'a elt | Multipart of 'a t option list elt
 
-val parser : emitters:'id emitters -> Content_type.t -> 'id t Angstrom.t
+val parser : emitters:'id emitters -> Content_type.t -> max_chunk_size:int -> 'id t Angstrom.t
 (** [parser ~emitters content_type] creates an [angstrom]'s parser which can
    process a [multipart/form-data] input. For each [Leaf], the parser calls
    [emitters] to be able to save contents and get a {i reference} of it.
