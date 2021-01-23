@@ -1,6 +1,11 @@
 let stream () =
   let buf = Buffer.create 0x100 in
-  (buf, function Some str -> Buffer.add_string buf str | None -> ())
+  ( buf,
+    function
+    | Some str ->
+        Buffer.add_string buf
+          (Bigstringaf.substring str.Faraday.buffer ~off:str.off ~len:str.len)
+    | None -> () )
 
 let gen =
   let v = ref (-1) in
@@ -22,7 +27,7 @@ let parser ~emitters =
   let open Multipart_form in
   Header.Decoder.header >>= fun header ->
   let content_type = Header.content_type header in
-  parser ~emitters content_type
+  parser ~emitters content_type ~max_chunk_size:1024
 
 (* nc -l 8000
  * echo "Content of a.txt." > a.txt

@@ -1,6 +1,7 @@
 (executable
  (name test)
- (libraries alcotest fmt rresult result angstrom multipart_form))
+ (libraries alcotest fmt rresult result angstrom multipart_form bigstringaf
+   faraday))
 
 (rule
  (alias runtest)
