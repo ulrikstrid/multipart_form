@@ -1,6 +1,6 @@
 type t = Field.field list
 
-let pp = Fmt.(list ~sep:(always "@\n") Field.pp)
+let pp = Fmt.(list ~sep:(any "@\n") Field.pp)
 
 let assoc field_name header =
   let f acc (Field.Field (field_name', _, _) as field) =
@@ -22,6 +22,8 @@ let exists field_name t =
 let empty = []
 
 let concat a b = a @ b
+
+let to_list x = x
 
 let add : type a. Field_name.t -> a Field.t * a -> t -> t =
  fun field_name (w, v) t ->

@@ -1,7 +1,7 @@
 (executable
  (name test)
- (libraries alcotest fmt rresult result angstrom multipart_form bigstringaf
-   faraday))
+ (libraries rosetta unstrctrd unstrctrd.parser alcotest fmt rresult result
+   angstrom multipart_form faraday bigstringaf))
 
 (rule
  (alias runtest)

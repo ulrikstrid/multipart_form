@@ -1,4 +1,9 @@
 open Stdlib
+
+let src = Logs.Src.create "multipart-form"
+
+module Log = (val Logs.src_log src : Logs.LOG)
+
 module Field_name = Field_name
 module Field = Field
 module Header = Header
@@ -66,20 +71,20 @@ module B64 = struct
         | `Await -> assert false
         | `Flush data ->
             write_data data ;
-            finish ()
-        | `Malformed err -> fail err
-        | `Wrong_padding -> fail "wrong padding"
+            commit >>= finish
+        | `Malformed err -> commit *> fail err
+        | `Wrong_padding -> commit *> fail "wrong padding"
         | `End -> commit
       and go () =
         match Base64_rfc2045.decode dec with
         | `Await ->
             Base64_rfc2045.src dec Bytes.empty 0 0 ;
-            finish ()
+            commit >>= finish
         | `Flush data ->
             write_data data ;
-            go ()
-        | `Malformed err -> fail err
-        | `Wrong_padding -> fail "wrong padding"
+            commit >>= go
+        | `Malformed err -> commit *> fail err
+        | `Wrong_padding -> commit *> fail "wrong padding"
         | `End -> commit in
 
       go () in
@@ -89,11 +94,11 @@ module B64 = struct
       | true ->
           let chunk = Bytes.sub chunk 0 (Bytes.length chunk - 1) in
           Base64_rfc2045.src dec chunk 0 (Bytes.length chunk) ;
-          trailer ()
+          commit *> trailer ()
       | false ->
           Bytes.set chunk (Bytes.length chunk - 1) end_of_body.[0] ;
           Base64_rfc2045.src dec chunk 0 (Bytes.length chunk) ;
-          advance 1 *> m in
+          advance 1 *> commit *> m in
 
     Unsafe.take_while (( <> ) end_of_body.[0]) Bigstringaf.substring
     >>= fun chunk ->
@@ -106,9 +111,9 @@ module B64 = struct
           check_end_of_body >>= choose chunk'
       | `Flush data ->
           write_data data ;
-          go ()
-      | `Malformed err -> fail err
-      | `Wrong_padding -> fail "wrong padding" in
+          commit >>= go
+      | `Malformed err -> commit *> fail err
+      | `Wrong_padding -> commit *> fail "wrong padding" in
     go ()
 
   let with_emitter ~emitter end_of_body =
@@ -125,19 +130,19 @@ module B64 = struct
         peek_char >>= function
         | None ->
             Base64_rfc2045.src dec Bytes.empty 0 0 ;
-            return ()
+            commit *> return ()
         | Some _ ->
             available >>= fun n ->
             Unsafe.take n (fun ba ~off ~len ->
                 let chunk = Bytes.create len in
                 Bigstringaf.blit_to_bytes ba ~src_off:off chunk ~dst_off:0 ~len ;
                 Base64_rfc2045.src dec chunk 0 len)
-            >>= fun () -> m)
+            >>= fun () -> commit *> m)
     | `Flush data ->
         write_data data ;
-        m
-    | `Malformed err -> fail err
-    | `Wrong_padding -> fail "wrong padding"
+        commit *> m
+    | `Malformed err -> commit *> fail err
+    | `Wrong_padding -> commit *> fail "wrong padding"
 
   let to_end_of_input_with_push push =
     let write_data, _ = IOVec.with_push push in
@@ -151,6 +156,15 @@ module RAW = struct
     { length : int ref
     ; mutable chunks : Bigstringaf.t IOVec.t list
     }
+
+  (* let rec index v max idx chr =
+    if idx >= max
+    then raise Not_found
+    else if Bigstringaf.get v idx = chr
+    then idx
+    else index v max (succ idx) chr
+
+  let index v chr = index v (Bigstringaf.length v) 0 chr *)
 
   let bounded_end_of_body
       ~max_chunk_size end_of_body_discriminant current_chunk_size c
@@ -191,6 +205,10 @@ module RAW = struct
         Unsafe.take_till pred IOVec.copy >>= fun chunk ->
         check_end >>= function
         | true ->
+          (* XXX(dinosaure): if it returns [true], we have in front
+           * of us the end of the part. We need to **delete** the
+           * character which helped us to recognize the begin of
+           * [end_of_body]. *)
           current_chunks.chunks <- chunk :: current_chunks.chunks;
           let iovec = iovec_from_chunks current_chunks in
           current_chunks.length := 0;
@@ -199,6 +217,10 @@ module RAW = struct
           commit
         | false ->
           (* [\r] *)
+          (* XXX(dinosaure): otherwise, we restore the end of our chunk
+           * with the first character of [end_of_body] and pass it to
+           * [write_data]. Then we redo the compuation. *)
+          (* Bytes.set chunk (Bytes.length chunk - 1) end_of_body.[0] ; *)
           Unsafe.take 1 IOVec.copy >>= fun cr ->
           incr current_chunks.length;
           current_chunks.chunks <- cr :: chunk :: current_chunks.chunks;
@@ -209,7 +231,8 @@ module RAW = struct
             write_data iovec;
             commit *> m)
           else
-            m)
+            (* XXX(anmonteiro): not sure about this? *)
+            commit *> m)
 
   let multipart_parser ~max_chunk_size ~write_data end_of_body =
     let check_end_of_body =
@@ -227,8 +250,8 @@ module RAW = struct
       ~pred:bounded_end_of_body
       ~check_end:check_end_of_body
 
-  let with_push ~max_chunk_size ~push end_of_body =
-    let write_data x = push (Some x) in
+  let with_emitter ~max_chunk_size ~emitter end_of_body =
+    let write_data x = emitter (Some x) in
     multipart_parser ~max_chunk_size ~write_data end_of_body
 
   let to_end_of_input ~max_chunk_size ~write_data =
@@ -270,26 +293,26 @@ module QP = struct
            end of input, it will return [`Malformed]. *)
         | `Data data ->
             write_data data ;
-            finish ()
+            commit >>= finish
         | `Line line ->
             write_line line ;
-            finish ()
+            commit >>= finish
         | `End -> commit
-        | `Malformed err -> fail err
+        | `Malformed err -> commit *> fail err
       and go () =
         match Pecu.decode dec with
         | `Await ->
             (* definitely [end_of_body]. *)
             Pecu.src dec Bytes.empty 0 0 ;
-            finish ()
+            commit >>= finish
         | `Data data ->
             write_data data ;
-            go ()
+            commit >>= go
         | `Line line ->
             write_line line ;
-            go ()
+            commit >>= go
         | `End -> commit
-        | `Malformed err -> fail err in
+        | `Malformed err -> commit *> fail err in
 
       go () in
 
@@ -301,7 +324,7 @@ module QP = struct
              unroll all outputs availables on [pecu]. *)
           let chunk = Bytes.sub chunk 0 (Bytes.length chunk - 1) in
           Pecu.src dec chunk 0 (Bytes.length chunk) ;
-          trailer ()
+          commit >>= trailer
       | false ->
           (* at this stage, byte after [chunk] is NOT a part of [end_of_body]. We
              can notice to [pecu] [chunk + end_of_body.[0]], advance on the
@@ -309,7 +332,7 @@ module QP = struct
              (see below). *)
           Bytes.set chunk (Bytes.length chunk - 1) end_of_body.[0] ;
           Pecu.src dec chunk 0 (Bytes.length chunk) ;
-          advance 1 *> m in
+          advance 1 *> commit *> m in
 
     (* take while we did not discover the first byte of [end_of_body]. *)
     Unsafe.take_while (( <> ) end_of_body.[0]) Bigstringaf.substring
@@ -327,14 +350,14 @@ module QP = struct
              [end_of_body]. The result will be sended to [choose]. *)
           let chunk' = Bytes.create (String.length chunk + 1) in
           Bytes.blit_string chunk 0 chunk' 0 (String.length chunk) ;
-          check_end_of_body >>= choose chunk'
+          check_end_of_body <* commit >>= choose chunk'
       | `Data data ->
           write_data data ;
-          go ()
+          commit >>= go
       | `Line line ->
           write_line line ;
-          go ()
-      | `Malformed err -> fail err in
+          commit >>= go
+      | `Malformed err -> commit *> fail err in
     go ()
 
   let to_end_of_input ~write_data ~write_line =
@@ -347,21 +370,22 @@ module QP = struct
         peek_char >>= function
         | None ->
             Pecu.src dec Bytes.empty 0 0 ;
-            return ()
+            commit
         | Some _ ->
             available >>= fun n ->
             Unsafe.take n (fun ba ~off ~len ->
                 let chunk = Bytes.create len in
                 Bigstringaf.blit_to_bytes ba ~src_off:off chunk ~dst_off:0 ~len ;
                 Pecu.src dec chunk 0 len)
-            >>= fun () -> m)
+            *> commit
+            *> m)
     | `Data data ->
         write_data data ;
-        m
+        commit *> m
     | `Line line ->
         write_line line ;
-        m
-    | `Malformed err -> fail err
+        commit *> m
+    | `Malformed err -> commit *> fail err
 
   let with_push ~push end_of_body =
     let write_data, write_line = IOVec.with_push push in
@@ -375,6 +399,16 @@ end
 type 'a elt = { header : Header.t; body : 'a }
 
 type 'a t = Leaf of 'a elt | Multipart of 'a t option list elt
+
+let rec map f = function
+  | Leaf { header; body } -> Leaf { header; body = f body }
+  | Multipart { header; body } ->
+      Multipart { header; body = List.map (Option.map (map f)) body }
+
+let rec flatten = function
+  | Leaf elt -> [ elt ]
+  | Multipart { header = _; body } ->
+      List.flatten @@ List.filter_map (Option.map flatten) body
 
 let iter ~f buf ~off ~len =
   for i = off to len - 1 do
@@ -495,16 +529,22 @@ let content_encoding fields =
     !encoding
   with Found -> !encoding
 
-let failf fmt = Fmt.kstrf Angstrom.fail fmt
+let failf fmt = Fmt.kstr Angstrom.fail fmt
 
 let octet ~max_chunk_size ~emitter boundary header =
   let open Angstrom in
   match boundary with
   | None ->
       (match content_encoding header with
-      | `Quoted_printable -> QP.to_end_of_input_with_push emitter
-      | `Base64 -> B64.to_end_of_input_with_push emitter
-      | `Bit7 | `Bit8 | `Binary -> RAW.to_end_of_input_with_push ~max_chunk_size emitter
+      | `Quoted_printable ->
+          Log.debug (fun m -> m "Decode the quoted-printable final part.") ;
+          QP.to_end_of_input_with_push emitter
+      | `Base64 ->
+          Log.debug (fun m -> m "Decode the base64 final part.") ;
+          B64.to_end_of_input_with_push emitter
+      | `Bit7 | `Bit8 | `Binary ->
+          Log.debug (fun m -> m "Decode the 8-bit final part.") ;
+          RAW.to_end_of_input_with_push ~max_chunk_size emitter
       | `Ietf_token v | `X_token v ->
           failf "Invalid Content-Transfer-Encoding value (%s)" v)
       >>= fun () ->
@@ -513,9 +553,15 @@ let octet ~max_chunk_size ~emitter boundary header =
   | Some boundary ->
       let end_of_body = Rfc2046.make_delimiter boundary in
       (match content_encoding header with
-      | `Quoted_printable -> QP.with_push ~push:emitter end_of_body
-      | `Base64 -> B64.with_emitter ~emitter end_of_body
-      | `Bit7 | `Bit8 | `Binary -> RAW.with_push ~max_chunk_size ~push:emitter end_of_body
+      | `Quoted_printable ->
+          Log.debug (fun m -> m "Decode a quoted-printable part.") ;
+          QP.with_push ~push:emitter end_of_body
+      | `Base64 ->
+          Log.debug (fun m -> m "Decode a base64 part.") ;
+          B64.with_emitter ~emitter end_of_body
+      | `Bit7 | `Bit8 | `Binary ->
+          Log.debug (fun m -> m "Decode a 8-bit part.") ;
+          RAW.with_emitter ~max_chunk_size ~emitter end_of_body
       | `Ietf_token v | `X_token v ->
           failf "Invalid Content-Transfer-Encoding value (%s)" v)
       >>= fun () ->
@@ -555,14 +601,63 @@ let parser
     | None -> failf "Invalid Content-Type, missing boundary" in
   body None header
 
-let parser ~emitters content_type =
-  parser ~emitters
+let parser ~max_chunk_size ~emitters  content_type =
+  parser ~max_chunk_size ~emitters
     [ Field.Field (Field_name.content_type, Field.Content_type, content_type) ]
 
 let blit src src_off dst dst_off len =
   Bigstringaf.blit_from_string src ~src_off dst ~dst_off ~len
 
-let of_stream stream content_type =
+let parse :
+    max_chunk_size:int ->
+    emitters:'id emitters ->
+    Content_type.t ->
+    [ `String of string | `Eof ] ->
+    [ `Continue | `Done of 'id t | `Fail of string ] =
+ fun ~max_chunk_size ~emitters content_type ->
+  let parser = parser ~emitters ~max_chunk_size content_type in
+  let state = ref (Angstrom.Unbuffered.parse parser) in
+  let ke = Ke.Rke.create ~capacity:0x1000 Bigarray.char in
+  fun data ->
+    match !state with
+    | Angstrom.Unbuffered.Done (_, tree) -> `Done tree
+    | Fail (_, _, msg) -> `Fail msg
+    | Partial { committed; continue } ->
+        Ke.Rke.N.shift_exn ke committed ;
+        if committed = 0 then Ke.Rke.compress ke ;
+        Log.debug (fun m -> m "Partial state of the multipart/form stream.") ;
+        (match data with
+        | `String "" -> ()
+        | `String str ->
+            Log.debug (fun m ->
+                m "Capacity of the internal queue: %d byte(s)."
+                  (Ke.Rke.capacity ke)) ;
+            Log.debug (fun m ->
+                m "Length of the internal queue: %d byte(s)." (Ke.Rke.length ke)) ;
+            Ke.Rke.N.push ke ~blit ~length:String.length ~off:0
+              ~len:(String.length str) str ;
+            let[@warning "-8"] (slice :: _) = Ke.Rke.N.peek ke in
+            state :=
+              continue slice ~off:0 ~len:(Bigstringaf.length slice) Incomplete
+        | `Eof -> (
+            Log.debug (fun m -> m "End of input.") ;
+            match Ke.Rke.N.peek ke with
+            | [] ->
+                Log.debug (fun m -> m "No more payloads.") ;
+                state := continue Bigstringaf.empty ~off:0 ~len:0 Complete
+            | [ slice ] ->
+                Log.debug (fun m ->
+                    m "Remain one payload: %S" (Bigstringaf.to_string slice)) ;
+                state :=
+                  continue slice ~off:0 ~len:(Bigstringaf.length slice) Complete
+            | slice :: _ ->
+                Log.debug (fun m -> m "Remain multiple payloads") ;
+                state :=
+                  continue slice ~off:0 ~len:(Bigstringaf.length slice)
+                    Incomplete)) ;
+        `Continue
+
+let of_stream_tbl stream content_type =
   let gen =
     let v = ref (-1) in
     fun () ->
@@ -576,41 +671,44 @@ let of_stream stream content_type =
     ((function Some iovec ->
       let str = IOVec.substring iovec in
       Buffer.add_string buf str | None -> ()), idx) in
-  let parser = parser ~emitters ~max_chunk_size:0x100 content_type in
-  let module Ke = Ke.Rke in
-  let ke = Ke.create ~capacity:0x1000 Bigarray.Char in
-  let rec go = function
-    | Angstrom.Unbuffered.Done (_, m) ->
-        let assoc =
-          Hashtbl.fold (fun k b a -> (k, Buffer.contents b) :: a) tbl [] in
-        Ok (m, assoc)
-    | Fail _ -> Error (`Msg "Invalid input")
-    | Partial { committed; continue } -> (
-        Ke.N.shift_exn ke committed ;
-        if committed = 0 then Ke.compress ke ;
-        match stream () with
-        | Some str ->
-            (* TODO: [""] *)
-            Ke.N.push ke ~blit ~length:String.length ~off:0
-              ~len:(String.length str) str ;
-            let[@warning "-8"] (slice :: _) = Ke.N.peek ke in
-            go
-              (continue slice ~off:0 ~len:(Bigstringaf.length slice) Incomplete)
-        | None ->
-            let[@warning "-8"] (slice :: _) = Ke.N.peek ke in
-            go (continue slice ~off:0 ~len:(Bigstringaf.length slice) Complete))
-  in
-  go (Angstrom.Unbuffered.parse parser)
+  let parse = parse ~emitters ~max_chunk_size:0x100 content_type in
+  let rec go () =
+    let data = match stream () with None -> `Eof | Some str -> `String str in
+    match parse data with
+    | `Continue -> go ()
+    | `Done m -> Ok (m, tbl)
+    | `Fail _msg -> Error (`Msg "Invalid input") in
+  go ()
 
-let of_string str content_type =
+let of_stream_to_list stream content_type =
+  match of_stream_tbl stream content_type with
+  | Ok (m, tbl) ->
+      let assoc =
+        Hashtbl.fold (fun k b a -> (k, Buffer.contents b) :: a) tbl [] in
+      Ok (m, assoc)
+  | Error e -> Error e
+
+let of_stream_to_tree stream content_type =
+  match of_stream_tbl stream content_type with
+  | Ok (m, tbl) ->
+      let m' = map (fun k -> Buffer.contents (Hashtbl.find tbl k)) m in
+      Ok m'
+  | Error e -> Error e
+
+let stream_of_string str =
   let consumed = ref false in
-  let stream () =
+  fun () ->
     if !consumed
     then None
     else (
       consumed := true ;
-      Some str) in
-  of_stream stream content_type
+      Some str)
+
+let of_string_to_list str content_type =
+  of_stream_to_list (stream_of_string str) content_type
+
+let of_string_to_tree str content_type =
+  of_stream_to_tree (stream_of_string str) content_type
 
 type part = { header : Header.t; body : (string * int * int) stream }
 
@@ -664,46 +762,47 @@ let multipart ~rng ?g ?(header = Header.empty) ?boundary parts =
   { header; parts }
 
 (* stream helpers *)
+module Stream = struct
+  let none () = None
 
-let none () = None
+  let map f stream =
+    let go () = match stream () with Some v -> Some (f v) | None -> None in
+    go
 
-let map f stream =
-  let go () = match stream () with Some v -> Some (f v) | None -> None in
-  go
+  let of_string x =
+    let once = ref false in
+    let go () =
+      if !once
+      then None
+      else (
+        once := true ;
+        Some (x, 0, String.length x)) in
+    go
 
-let stream_of_string x =
-  let once = ref false in
-  let go () =
-    if !once
-    then None
-    else (
-      once := true ;
-      Some (x, 0, String.length x)) in
-  go
+  let crlf () = of_string "\r\n"
 
-let crlf () = stream_of_string "\r\n"
+  let concat s0 s1 =
+    let c = ref s0 in
+    let rec go () =
+      match !c () with
+      | Some x -> Some x
+      | None ->
+          if !c == s0
+          then (
+            c := s1 ;
+            go ())
+          else None in
+    go
 
-let concat s0 s1 =
-  let c = ref s0 in
-  let rec go () =
-    match !c () with
-    | Some x -> Some x
-    | None ->
-        if !c == s0
-        then (
-          c := s1 ;
-          go ())
-        else None in
-  go
+  let ( @ ) a b = concat a b
 
-let ( @ ) a b = concat a b
-
-let stream_of_part { header; body } =
-  let content_stream =
-    map
-      (fun s -> (s, 0, String.length s))
-      (Prettym.to_stream Header.Encoder.header header) in
-  content_stream @ crlf () @ body
+  let of_part { header; body } =
+    let content_stream =
+      map
+        (fun s -> (s, 0, String.length s))
+        (Prettym.to_stream Header.Encoder.header header) in
+    content_stream @ crlf () @ body
+end
 
 let to_stream : multipart -> Header.t * (string * int * int) stream =
  fun { header; parts } ->
@@ -717,10 +816,10 @@ let to_stream : multipart -> Header.t * (string * int * int) stream =
   let closer = Rfc2046.make_close_delimiter boundary ^ "\r\n" in
 
   let rec go stream = function
-    | [] -> none
-    | [ x ] -> stream @ stream_of_part x @ stream_of_string closer
+    | [] -> Stream.none
+    | [ x ] -> Stream.(stream @ of_part x @ of_string closer)
     | x :: r ->
-        let stream = stream @ stream_of_part x @ stream_of_string inner in
+        let stream = Stream.(stream @ of_part x @ of_string inner) in
         go stream r in
 
-  (header, go (stream_of_string beginner) parts)
+  (header, go (Stream.of_string beginner) parts)

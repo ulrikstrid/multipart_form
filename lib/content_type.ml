@@ -291,7 +291,7 @@ module Parameters = struct
 
   let pp ppf t =
     let pp ppf (key, value) = Fmt.pf ppf "%a=%a" pp_key key pp_value value in
-    Fmt.list ~sep:(Fmt.always ";@ ") pp ppf (Map.bindings t)
+    Fmt.list ~sep:(Fmt.any ";@ ") pp ppf (Map.bindings t)
 
   let of_escaped_character = function
     | '\x61' -> '\x07' (* "\a" *)
@@ -396,7 +396,7 @@ let equal a b =
 module Decoder = struct
   open Angstrom
 
-  let invalid_token token = Fmt.kstrf fail "invalid token: %s" token
+  let invalid_token token = Fmt.kstr fail "invalid token: %s" token
 
   let of_string s a =
     match parse_string ~consume:Consume.All a s with
@@ -602,9 +602,10 @@ let of_string str =
   let open Rresult in
   Unstrctrd.of_string str
   >>| (fun (_, v) -> Unstrctrd.fold_fws v)
+  >>= Unstrctrd.without_comments
   >>| Unstrctrd.to_utf_8_string
   >>= fun str ->
-  match Angstrom.parse_string ~consume:All Decoder.content str with
+  match Angstrom.parse_string ~consume:Prefix Decoder.content str with
   | Ok v -> Ok v
   | Error _ -> R.error_msgf "Invalid (unfolded) Content-Type value: %S" str
 
@@ -661,3 +662,5 @@ module Encoder = struct
           ]
           t.ty t.subty t.parameters
 end
+
+let to_string v = Prettym.to_string Encoder.content_type v
