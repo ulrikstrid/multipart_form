@@ -19,7 +19,6 @@ let is_tspecials = function
   | _ -> false
 
 let is_ctl = function '\000' .. '\031' | '\127' -> true | _ -> false
-
 let is_space = ( = ) ' '
 
 (* From RFC 2045
@@ -36,35 +35,22 @@ let is_obs_no_ws_ctl = function
   | '\001' .. '\008' | '\011' | '\012' | '\014' .. '\031' | '\127' -> true
   | _ -> false
 
-let is_qtext = function
-  | '\033' | '\035' .. '\091' | '\093' .. '\126' -> true
-  | c -> is_obs_no_ws_ctl c
+let is_qtext = function '\r' | '\\' | '"' -> false | _ -> true
 
 module Type = struct
   type discrete = [ `Text | `Image | `Audio | `Video | `Application ]
-
   type composite = [ `Multipart ]
-
   type extension = [ `Ietf_token of string | `X_token of string ]
-
   type t = [ discrete | composite | extension ]
 
   let text = `Text
-
   let image = `Image
-
   let audio = `Audio
-
   let video = `Video
-
   let application = `Application
-
   let multipart = `Multipart
-
   let is_discrete = function #discrete -> true | _ -> false
-
   let is_multipart = function `Multipart -> true | _ -> false
-
   let ietf token = Ok (`Ietf_token token)
 
   let extension token =
@@ -111,7 +97,6 @@ module Type = struct
       compare (lowercase_ascii (to_string a)) (lowercase_ascii (to_string b)))
 
   let equal a b = compare a b = 0
-
   let default = `Text
 end
 
@@ -161,7 +146,6 @@ module Subtype = struct
         String.(compare (lowercase_ascii a) (lowercase_ascii b))
 
   let equal a b = compare a b = 0
-
   let default = `Iana_token "plain"
 end
 
@@ -169,9 +153,7 @@ module Parameters = struct
   module Map = Map.Make (String)
 
   type key = string
-
   type value = String of string | Token of string
-
   type t = value Map.t
 
   let key key =
@@ -264,7 +246,6 @@ module Parameters = struct
     match value x with Ok v -> v | Error (`Msg err) -> invalid_arg err
 
   let v x = value_exn x
-
   let empty = Map.empty
 
   let mem key t =
@@ -273,16 +254,13 @@ module Parameters = struct
     Map.mem key t
 
   let add key value t = Map.add key value t
-
   let singleton key value = Map.singleton key value
-
   let remove key t = Map.remove key t
 
   let find key t =
     match Map.find key t with x -> Some x | exception Not_found -> None
 
   let iter f t = Map.iter f t
-
   let pp_key : key Fmt.t = Fmt.string
 
   let pp_value ppf = function
@@ -333,14 +311,12 @@ module Parameters = struct
     | String a, String b -> String.equal (value_unescape a) (value_unescape b)
 
   let compare = Map.compare value_compare
-
   let equal = Map.equal value_equal
 
   let of_list lst =
     List.fold_left (fun a (key, value) -> Map.add key value a) Map.empty lst
 
   let to_list t = Map.bindings t
-
   let default = Map.add "charset" (Token "us-ascii") Map.empty
 end
 
@@ -358,17 +334,11 @@ let default =
   }
 
 let ty { ty; _ } = ty
-
 let subty { subty; _ } = subty
-
 let parameters { parameters; _ } = parameters
-
 let is_discrete { ty; _ } = Type.is_discrete ty
-
 let is_multipart { ty; _ } = Type.is_multipart ty
-
 let with_type : t -> Type.t -> t = fun t ty -> { t with ty }
-
 let with_subtype : t -> Subtype.t -> t = fun t subty -> { t with subty }
 
 let with_parameter : t -> Parameters.key * Parameters.value -> t =
@@ -404,7 +374,6 @@ module Decoder = struct
     | Error _ -> None
 
   let is_wsp = function ' ' | '\t' -> true | _ -> false
-
   let token = take_while1 is_token
 
   (* From RFC 2045
@@ -482,11 +451,8 @@ module Decoder = struct
       | None -> invalid_token s)
 
   let _3 x y z = (x, y, z)
-
   let _4 a b c d = (a, b, c, d)
-
   let ( .![]<- ) = Bytes.set
-
   let utf_8_tail = satisfy @@ function '\x80' .. '\xbf' -> true | _ -> false
 
   let utf_8_0 =

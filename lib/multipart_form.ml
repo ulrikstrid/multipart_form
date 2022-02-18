@@ -3,7 +3,6 @@ open Stdlib
 let src = Logs.Src.create "multipart-form"
 
 module Log = (val Logs.src_log src : Logs.LOG)
-
 module Field_name = Field_name
 module Field = Field
 module Header = Header
@@ -12,11 +11,7 @@ module Content_encoding = Content_encoding
 module Content_disposition = Content_disposition
 
 module IOVec = struct
-  type 'a t = 'a Faraday.iovec =
-    { buffer : 'a
-    ; off : int
-    ; len : int
-    }
+  type 'a t = 'a Faraday.iovec = { buffer : 'a; off : int; len : int }
 
   let make buffer ~off ~len = { Faraday.buffer; off; len }
 
@@ -33,23 +28,17 @@ module IOVec = struct
     let write_data s =
       let len = String.length s in
       let buffer = Bigstringaf.create len in
-      Bigstringaf.blit_from_string s ~src_off:0 buffer ~dst_off:0 ~len;
-      push (Some (make buffer ~off:0 ~len))
-    in
+      Bigstringaf.blit_from_string s ~src_off:0 buffer ~dst_off:0 ~len ;
+      push (Some (make buffer ~off:0 ~len)) in
     let write_line s =
       let strlen = String.length s in
       let len = strlen + eol_len in
       let buffer = Bigstringaf.create len in
-      Bigstringaf.blit_from_string s ~src_off:0 buffer ~dst_off:0 ~len:strlen;
-      Bigstringaf.blit_from_string
-        end_of_line
-        ~src_off:0
-        buffer
-        ~dst_off:strlen
-        ~len:eol_len;
-      push (Some (make buffer ~off:0 ~len))
-    in
-    write_data, write_line
+      Bigstringaf.blit_from_string s ~src_off:0 buffer ~dst_off:0 ~len:strlen ;
+      Bigstringaf.blit_from_string end_of_line ~src_off:0 buffer ~dst_off:strlen
+        ~len:eol_len ;
+      push (Some (make buffer ~off:0 ~len)) in
+    (write_data, write_line)
 end
 
 type 'a stream = unit -> 'a option
@@ -63,8 +52,7 @@ module B64 = struct
       let expected_len = String.length end_of_body in
       Unsafe.peek expected_len (fun ba ~off ~len ->
           let raw = Bigstringaf.substring ba ~off ~len in
-          String.equal raw end_of_body)
-    in
+          String.equal raw end_of_body) in
     let trailer () =
       let rec finish () =
         match Base64_rfc2045.decode dec with
@@ -152,29 +140,28 @@ end
 module RAW = struct
   open Angstrom
 
-  type chunks =
-    { length : int ref
-    ; mutable chunks : Bigstringaf.t IOVec.t list
-    }
+  type chunks = {
+    length : int ref;
+    mutable chunks : Bigstringaf.t IOVec.t list;
+  }
 
   (* let rec index v max idx chr =
-    if idx >= max
-    then raise Not_found
-    else if Bigstringaf.get v idx = chr
-    then idx
-    else index v max (succ idx) chr
+       if idx >= max
+       then raise Not_found
+       else if Bigstringaf.get v idx = chr
+       then idx
+       else index v max (succ idx) chr
 
-  let index v chr = index v (Bigstringaf.length v) 0 chr *)
+     let index v chr = index v (Bigstringaf.length v) 0 chr *)
 
-  let bounded_end_of_body
-      ~max_chunk_size end_of_body_discriminant current_chunk_size c
-    =
+  let bounded_end_of_body ~max_chunk_size end_of_body_discriminant
+      current_chunk_size c =
     let cur_size = !current_chunk_size in
     (* leave space for the `\r` char *)
     let big_enough = cur_size + 1 >= max_chunk_size in
     let result = Char.equal end_of_body_discriminant c in
     let result = big_enough || result in
-    if not result then incr current_chunk_size;
+    if not result then incr current_chunk_size ;
     result
 
   let iovec_from_chunks { chunks; length } =
@@ -185,17 +172,11 @@ module RAW = struct
       List.fold_left
         (fun prev_off { IOVec.buffer; off; len } ->
           let cur_off = prev_off - len in
-          Bigstringaf.unsafe_blit
-            buffer
-            ~src_off:off
-            result_buffer
-            ~dst_off:cur_off
-            ~len;
+          Bigstringaf.unsafe_blit buffer ~src_off:off result_buffer
+            ~dst_off:cur_off ~len ;
           cur_off)
-        len
-        chunks
-    in
-    assert (final_len = 0);
+        len chunks in
+    assert (final_len = 0) ;
     IOVec.make result_buffer ~off:0 ~len:(Bigstringaf.length result_buffer)
 
   let parser ~max_chunk_size ~write_data ~pred ~check_end =
@@ -205,49 +186,44 @@ module RAW = struct
         Unsafe.take_till pred IOVec.copy >>= fun chunk ->
         check_end >>= function
         | true ->
-          (* XXX(dinosaure): if it returns [true], we have in front
-           * of us the end of the part. We need to **delete** the
-           * character which helped us to recognize the begin of
-           * [end_of_body]. *)
-          current_chunks.chunks <- chunk :: current_chunks.chunks;
-          let iovec = iovec_from_chunks current_chunks in
-          current_chunks.length := 0;
-          current_chunks.chunks <- [];
-          if iovec.len <> 0 then write_data iovec;
-          commit
-        | false ->
-          (* [\r] *)
-          (* XXX(dinosaure): otherwise, we restore the end of our chunk
-           * with the first character of [end_of_body] and pass it to
-           * [write_data]. Then we redo the compuation. *)
-          (* Bytes.set chunk (Bytes.length chunk - 1) end_of_body.[0] ; *)
-          Unsafe.take 1 IOVec.copy >>= fun cr ->
-          incr current_chunks.length;
-          current_chunks.chunks <- cr :: chunk :: current_chunks.chunks;
-          if !(current_chunks.length) >= max_chunk_size then (
+            (* XXX(dinosaure): if it returns [true], we have in front
+             * of us the end of the part. We need to **delete** the
+             * character which helped us to recognize the begin of
+             * [end_of_body]. *)
+            current_chunks.chunks <- chunk :: current_chunks.chunks ;
             let iovec = iovec_from_chunks current_chunks in
-            current_chunks.length := 0;
-            current_chunks.chunks <- [];
-            write_data iovec;
-            commit *> m)
-          else
-            (* XXX(anmonteiro): not sure about this? *)
-            commit *> m)
+            current_chunks.length := 0 ;
+            current_chunks.chunks <- [] ;
+            if iovec.len <> 0 then write_data iovec ;
+            commit
+        | false ->
+            (* [\r] *)
+            (* XXX(dinosaure): otherwise, we restore the end of our chunk
+             * with the first character of [end_of_body] and pass it to
+             * [write_data]. Then we redo the compuation. *)
+            (* Bytes.set chunk (Bytes.length chunk - 1) end_of_body.[0] ; *)
+            Unsafe.take 1 IOVec.copy >>= fun cr ->
+            incr current_chunks.length ;
+            current_chunks.chunks <- cr :: chunk :: current_chunks.chunks ;
+            if !(current_chunks.length) >= max_chunk_size
+            then (
+              let iovec = iovec_from_chunks current_chunks in
+              current_chunks.length := 0 ;
+              current_chunks.chunks <- [] ;
+              write_data iovec ;
+              commit *> m)
+            else (* XXX(anmonteiro): not sure about this? *)
+              commit *> m)
 
   let multipart_parser ~max_chunk_size ~write_data end_of_body =
     let check_end_of_body =
       let expected_len = String.length end_of_body in
       Unsafe.peek expected_len (fun ba ~off ~len ->
           let raw = Bigstringaf.substring ba ~off ~len in
-          String.equal raw end_of_body)
-    in
+          String.equal raw end_of_body) in
     let bounded_end_of_body =
-      bounded_end_of_body ~max_chunk_size end_of_body.[0]
-    in
-    parser
-      ~max_chunk_size
-      ~write_data
-      ~pred:bounded_end_of_body
+      bounded_end_of_body ~max_chunk_size end_of_body.[0] in
+    parser ~max_chunk_size ~write_data ~pred:bounded_end_of_body
       ~check_end:check_end_of_body
 
   let with_emitter ~max_chunk_size ~emitter end_of_body =
@@ -255,15 +231,12 @@ module RAW = struct
     multipart_parser ~max_chunk_size ~write_data end_of_body
 
   let to_end_of_input ~max_chunk_size ~write_data =
-    parser
-      ~max_chunk_size
-      ~write_data
-      ~check_end:at_end_of_input
+    parser ~max_chunk_size ~write_data ~check_end:at_end_of_input
       ~pred:(fun current_chunk_size _ ->
         let cur_size = !current_chunk_size in
         (* leave space for an additional character *)
         let big_enough = cur_size + 1 >= max_chunk_size in
-        if not big_enough then incr current_chunk_size;
+        if not big_enough then incr current_chunk_size ;
         big_enough)
 
   let to_end_of_input_with_push ~max_chunk_size push =
@@ -281,8 +254,7 @@ module QP = struct
       let expected_len = String.length end_of_body in
       Unsafe.peek expected_len (fun ba ~off ~len ->
           let raw = Bigstringaf.substring ba ~off ~len in
-          String.equal raw end_of_body)
-    in
+          String.equal raw end_of_body) in
     let trailer () =
       let rec finish () =
         match Pecu.decode dec with
@@ -397,7 +369,6 @@ module QP = struct
 end
 
 type 'a elt = { header : Header.t; body : 'a }
-
 type 'a t = Leaf of 'a elt | Multipart of 'a t option list elt
 
 let rec map f = function
@@ -568,7 +539,8 @@ let octet ~max_chunk_size ~emitter boundary header =
       emitter None ;
       return ()
 
-type 'id emitters = Header.t -> (Bigstringaf.t Faraday.iovec option -> unit) * 'id
+type 'id emitters =
+  Header.t -> (Bigstringaf.t Faraday.iovec option -> unit) * 'id
 
 type discrete = [ `Text | `Image | `Audio | `Video | `Application ]
 
@@ -578,10 +550,11 @@ let boundary header =
   | Some (Token boundary) | Some (String boundary) -> Some boundary
   | None -> None
 
-let parser
-    : max_chunk_size:int -> emitters:'id emitters -> Field.field list
-    -> 'id t Angstrom.t
-  =
+let parser :
+    max_chunk_size:int ->
+    emitters:'id emitters ->
+    Field.field list ->
+    'id t Angstrom.t =
  fun ~max_chunk_size ~emitters header ->
   let open Angstrom in
   let rec body parent header =
@@ -591,7 +564,7 @@ let parser
     | #discrete ->
         let emitter, id = emitters header in
         octet ~max_chunk_size ~emitter parent header >>| fun () ->
-          Leaf { header; body = id }
+        Leaf { header; body = id }
     | `Multipart ->
     match boundary header with
     | Some boundary ->
@@ -601,7 +574,7 @@ let parser
     | None -> failf "Invalid Content-Type, missing boundary" in
   body None header
 
-let parser ~max_chunk_size ~emitters  content_type =
+let parser ~max_chunk_size ~emitters content_type =
   parser ~max_chunk_size ~emitters
     [ Field.Field (Field_name.content_type, Field.Content_type, content_type) ]
 
@@ -668,9 +641,12 @@ let of_stream_tbl stream content_type =
     let idx = gen () in
     let buf = Buffer.create 0x100 in
     Hashtbl.add tbl idx buf ;
-    ((function Some iovec ->
-      let str = IOVec.substring iovec in
-      Buffer.add_string buf str | None -> ()), idx) in
+    ( (function
+      | Some iovec ->
+          let str = IOVec.substring iovec in
+          Buffer.add_string buf str
+      | None -> ()),
+      idx ) in
   let parse = parse ~emitters ~max_chunk_size:0x100 content_type in
   let rec go () =
     let data = match stream () with None -> `Eof | Some str -> `String str in
@@ -711,7 +687,6 @@ let of_string_to_tree str content_type =
   of_stream_to_tree (stream_of_string str) content_type
 
 type part = { header : Header.t; body : (string * int * int) stream }
-
 type multipart = { header : Header.t; parts : part list }
 
 let part ?(header = Header.empty) ?disposition ?encoding stream =
