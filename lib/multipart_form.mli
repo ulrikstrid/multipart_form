@@ -8,27 +8,16 @@ module Field_name : sig
   type t = private string
 
   val compare : t -> t -> int
-
   val equal : t -> t -> bool
-
   val capitalize : t -> t
-
   val canonicalize : t -> t
-
   val of_string : string -> (t, [> `Msg of string ]) result
-
   val of_string_exn : string -> t
-
   val v : string -> t
-
   val prefixed_by : string -> t -> bool
-
   val content_type : t
-
   val content_transfer_encoding : t
-
   val content_disposition : t
-
   val pp : t Fmt.t
 end
 
@@ -52,7 +41,6 @@ module Content_type : sig
       [ `Ietf_token of string | `Iana_token of string | `X_token of string ]
 
     val iana : string -> (t, [> `Msg of string ]) result
-
     val pp : t Fmt.t
   end
 
@@ -60,20 +48,20 @@ module Content_type : sig
     module Map : module type of Map.Make (String)
 
     type key = string
-
     type value = String of string | Token of string
-
     type t = value Map.t
 
     val key : string -> (key, [> `Msg of string ]) result
-
+    val key_exn : string -> key
+    val k : string -> key
     val value : string -> (value, [> `Msg of string ]) result
-
+    val value_exn : string -> value
+    val v : string -> value
     val add : key -> value -> t -> t
-
     val empty : t
-
     val pp : t Fmt.t
+    val of_list : (key * value) list -> t
+    val to_list : t -> (key * value) list
   end
 
   type t = {
@@ -83,9 +71,7 @@ module Content_type : sig
   }
 
   val make : Type.t -> Subtype.t -> Parameters.value Parameters.Map.t -> t
-
   val equal : t -> t -> bool
-
   val pp : t Fmt.t
 
   val of_string : string -> (t, [> `Msg of string ]) result
@@ -108,9 +94,7 @@ module Content_encoding : sig
     | `X_token of string ]
 
   val pp : t Fmt.t
-
   val of_string : string -> (t, [> `Msg of string ]) result
-
   val to_string : t -> string
 end
 
@@ -121,11 +105,8 @@ module Content_disposition : sig
     t -> [ `Inline | `Attachment | `Ietf_token of string | `X_token of string ]
 
   val name : t -> string option
-
   val filename : t -> string option
-
   val size : t -> int option
-
   val pp : t Fmt.t
 
   val v :
@@ -136,7 +117,6 @@ module Content_disposition : sig
     t
 
   val of_string : string -> (t, [> `Msg of string ]) result
-
   val to_string : t -> string
 end
 
@@ -165,7 +145,6 @@ module Field : sig
     | Field : Unstrctrd.t t
 
   type witness = Witness : 'a t -> witness
-
   type field = Field : Field_name.t * 'a t * 'a -> field
 end
 
@@ -186,7 +165,6 @@ module Header : sig
   type t
 
   val assoc : Field_name.t -> t -> Field.field list
-
   val exists : Field_name.t -> t -> bool
 
   val content_type : t -> Content_type.t
@@ -235,7 +213,6 @@ type 'a elt = { header : Header.t; body : 'a }
 type 'a t = Leaf of 'a elt | Multipart of 'a t option list elt
 
 val map : ('a -> 'b) -> 'a t -> 'b t
-
 val flatten : 'a t -> 'a elt list
 
 (** {3 Streaming API.} *)

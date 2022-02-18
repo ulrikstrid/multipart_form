@@ -12,7 +12,6 @@ type t = {
 }
 
 and value = String of string | Token of string
-
 and date = unit
 
 let v ?filename ?(kind = `Ietf_token "form-data") ?size name =
@@ -63,9 +62,7 @@ let name t =
   | None -> None
 
 let filename { filename; _ } = filename
-
 let size { size; _ } = size
-
 let disposition_type { ty; _ } = ty
 
 let of_escaped_character = function
@@ -87,79 +84,6 @@ let is_qtext = function
   | c -> is_obs_no_ws_ctl c
 
 let is_wsp = function ' ' | '\t' -> true | _ -> false
-
-module Rfc2045 = struct
-  open Angstrom
-
-  let _3 x y z = (x, y, z)
-
-  let _4 a b c d = (a, b, c, d)
-
-  let ( .![]<- ) = Bytes.set
-
-  let utf_8_tail = satisfy @@ function '\x80' .. '\xbf' -> true | _ -> false
-
-  let utf_8_0 =
-    satisfy (function '\xc2' .. '\xdf' -> true | _ -> false) >>= fun b0 ->
-    utf_8_tail >>= fun b1 ->
-    let res = Bytes.create 2 in
-    res.![0] <- b0 ;
-    res.![1] <- b1 ;
-    return (Bytes.unsafe_to_string res)
-
-  let utf_8_1 =
-    lift3 _3 (char '\xe0')
-      (satisfy @@ function '\xa0' .. '\xbf' -> true | _ -> false)
-      utf_8_tail
-    <|> lift3 _3
-          (satisfy @@ function '\xe1' .. '\xec' -> true | _ -> false)
-          utf_8_tail utf_8_tail
-    <|> lift3 _3 (char '\xed')
-          (satisfy @@ function '\x80' .. '\x9f' -> true | _ -> false)
-          utf_8_tail
-    <|> lift3 _3
-          (satisfy @@ function '\xee' .. '\xef' -> true | _ -> false)
-          utf_8_tail utf_8_tail
-
-  let utf_8_1 =
-    utf_8_1 >>= fun (b0, b1, b2) ->
-    let res = Bytes.create 3 in
-    res.![0] <- b0 ;
-    res.![1] <- b1 ;
-    res.![2] <- b2 ;
-    return (Bytes.unsafe_to_string res)
-
-  let utf_8_2 =
-    lift4 _4 (char '\xf0')
-      (satisfy @@ function '\x90' .. '\xbf' -> true | _ -> false)
-      utf_8_tail utf_8_tail
-    <|> lift4 _4
-          (satisfy @@ function '\xf1' .. '\xf3' -> true | _ -> false)
-          utf_8_tail utf_8_tail utf_8_tail
-    <|> lift4 _4 (char '\xf4')
-          (satisfy @@ function '\x80' .. '\x8f' -> true | _ -> false)
-          utf_8_tail utf_8_tail
-
-  let utf_8_2 =
-    utf_8_2 >>= fun (b0, b1, b2, b3) ->
-    let res = Bytes.create 4 in
-    res.![0] <- b0 ;
-    res.![1] <- b1 ;
-    res.![2] <- b2 ;
-    res.![3] <- b3 ;
-    return (Bytes.unsafe_to_string res)
-
-  let utf_8_and is =
-    satisfy is >>| String.make 1 <|> utf_8_0 <|> utf_8_1 <|> utf_8_2
-
-  let quoted_pair =
-    char '\\' *> any_char >>| of_escaped_character >>| String.make 1
-
-  let quoted_string =
-    char '"' *> many (quoted_pair <|> utf_8_and is_qtext)
-    <* char '"'
-    >>| String.concat ""
-end
 
 module Decoder = struct
   type parameter =
@@ -191,13 +115,11 @@ module Decoder = struct
     | _ -> false
 
   let invalid_token token = Fmt.kstr fail "invalid token: %s" token
-
   let nothing_to_do = Fmt.kstr fail "nothing to do"
 
   (* / *)
 
   let is_ctl = function '\000' .. '\031' | '\127' -> true | _ -> false
-
   let is_space = ( = ) ' '
 
   (* From RFC 2045
@@ -211,7 +133,6 @@ module Decoder = struct
     is_ascii c && (not (is_tspecials c)) && (not (is_ctl c)) && not (is_space c)
 
   let token = take_while1 is_token
-
   let is_digit = function '0' .. '9' -> true | _ -> false
 
   (* From RFC 2045
@@ -257,7 +178,7 @@ module Decoder = struct
           value := token / quoted-string
   *)
   let value =
-    Rfc2045.quoted_string
+    Content_type.Decoder.quoted_string
     >>| (fun v -> String v)
     <|> (token >>| fun v -> Token v)
 
@@ -289,13 +210,9 @@ module Decoder = struct
     string parm *> skip_while is_wsp *> char '=' *> skip_while is_wsp *> value
 
   let filename_parm = parm "filename" value
-
   let creation_date_parm = parm "creation-date" quoted_date_time
-
   let modification_date_parm = parm "modification-date" quoted_date_time
-
   let read_date_parm = parm "read-date" quoted_date_time
-
   let size_parm = parm "read-date" (take_while1 is_digit >>| int_of_string)
 
   let disposition_parm =
